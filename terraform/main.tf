@@ -1,10 +1,10 @@
 # ============================================================
 # Lab DevSecOps - Azure Infrastructure
-#   EC2         → Azure Container Instances (ACI)
-#   RDS MySQL   → Azure Database for MySQL Flexible Server
-#   VPC/Subnets → Azure Virtual Network + Subnets
-#   ALB         → Azure Application Gateway (simplificado: ACI directo)
-#   Secrets Mgr → Azure Key Vault
+#   Azure Container Instances (ACI)
+#   Azure Database for MySQL Flexible Server
+#   Azure Virtual Network + Subnets
+#   Azure Application Gateway (simplificado: ACI directo)
+#   Azure Key Vault
 # ============================================================
 
 terraform {
@@ -30,51 +30,45 @@ provider "azurerm" {
 }
 
 # ─── Variables ───────────────────────────────────────────────
+# Los valores concretos se definen en terraform.tfvars
+
 variable "location" {
-  description = "Azure region"
+  description = "Azure region donde se desplegará el laboratorio. Ejemplo: centralus, eastus2, westus2."
   type        = string
-  default     = "eastus"
 }
 
 variable "resource_group_name" {
   description = "Nombre del Resource Group"
   type        = string
-  default     = "rg-devsecops-lab"
 }
 
 variable "app_name" {
   description = "Nombre base de la aplicación"
   type        = string
-  default     = "studentrecords"
 }
 
 variable "db_admin_username" {
   description = "Usuario admin de MySQL"
   type        = string
-  default     = "sqladmin"
   sensitive   = true
 }
 
 variable "container_image" {
-  description = "Imagen Docker de la app (ACR o Docker Hub)"
+  description = "Imagen Docker de la app"
   type        = string
-  default     = "ghcr.io/REEMPLAZAR_USUARIO/student-records:latest"
 }
 
 variable "tags" {
-  description = "Tags comunes"
+  description = "Tags comunes para los recursos"
   type        = map(string)
-  default = {
-    Environment = "lab"
-    Course      = "seguridad-cloud-ugr"
-    ManagedBy   = "terraform"
-  }
 }
 
 # ─── Data sources ────────────────────────────────────────────
+
 data "azurerm_client_config" "current" {}
 
 # ─── Resource Group ──────────────────────────────────────────
+
 resource "azurerm_resource_group" "main" {
   name     = var.resource_group_name
   location = var.location
@@ -83,6 +77,7 @@ resource "azurerm_resource_group" "main" {
 
 # ─── Virtual Network ─────────────────────────────────────────
 # Equivalente a VPC en AWS
+
 resource "azurerm_virtual_network" "main" {
   name                = "vnet-${var.app_name}"
   location            = azurerm_resource_group.main.location
@@ -91,7 +86,9 @@ resource "azurerm_virtual_network" "main" {
   tags                = var.tags
 }
 
-# Subnet pública (para ACI con IP pública)
+# ─── Subnet pública ──────────────────────────────────────────
+# Para la app / capa de entrada
+
 resource "azurerm_subnet" "public" {
   name                 = "snet-public"
   resource_group_name  = azurerm_resource_group.main.name
@@ -100,6 +97,7 @@ resource "azurerm_subnet" "public" {
 
   delegation {
     name = "aci-delegation"
+
     service_delegation {
       name    = "Microsoft.ContainerInstance/containerGroups"
       actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
@@ -107,17 +105,18 @@ resource "azurerm_subnet" "public" {
   }
 }
 
-# Subnet privada (para MySQL - equivalente a private subnet en AWS)
+# ─── Subnet privada ──────────────────────────────────────────
+# Para MySQL Flexible Server
+
 resource "azurerm_subnet" "private" {
   name                 = "snet-private"
   resource_group_name  = azurerm_resource_group.main.name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = ["10.0.2.0/24"]
 
-  service_endpoints = ["Microsoft.Sql"]
-
   delegation {
     name = "mysql-delegation"
+
     service_delegation {
       name    = "Microsoft.DBforMySQL/flexibleServers"
       actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
@@ -125,7 +124,9 @@ resource "azurerm_subnet" "private" {
   }
 }
 
-# ─── Network Security Group (equivalente a Security Groups en AWS) ──
+# ─── Network Security Groups ─────────────────────────────────
+# Equivalente conceptual a Security Groups en AWS
+
 resource "azurerm_network_security_group" "app" {
   name                = "nsg-app"
   location            = azurerm_resource_group.main.location
@@ -163,7 +164,6 @@ resource "azurerm_network_security_group" "db" {
   resource_group_name = azurerm_resource_group.main.name
   tags                = var.tags
 
-  # Solo permite tráfico desde la subnet de la app (equivalente a SG-to-SG en AWS)
   security_rule {
     name                       = "allow-mysql-from-app"
     priority                   = 100
@@ -189,7 +189,39 @@ resource "azurerm_network_security_group" "db" {
   }
 }
 
-# ─── Key Vault (equivalente a AWS Secrets Manager) ───────────
+# Asociaciones NSG ↔ Subnet
+
+resource "azurerm_subnet_network_security_group_association" "app" {
+  subnet_id                 = azurerm_subnet.public.id
+  network_security_group_id = azurerm_network_security_group.app.id
+}
+
+resource "azurerm_subnet_network_security_group_association" "db" {
+  subnet_id                 = azurerm_subnet.private.id
+  network_security_group_id = azurerm_network_security_group.db.id
+}
+
+# ─── Private DNS para MySQL Flexible Server ──────────────────
+# Necesario cuando MySQL Flexible Server usa private access
+
+resource "azurerm_private_dns_zone" "mysql" {
+  name                = "${var.app_name}.mysql.database.azure.com"
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = var.tags
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "mysql" {
+  name                  = "mysql-dns-link-${var.app_name}"
+  resource_group_name   = azurerm_resource_group.main.name
+  private_dns_zone_name = azurerm_private_dns_zone.mysql.name
+  virtual_network_id    = azurerm_virtual_network.main.id
+  registration_enabled  = false
+  tags                  = var.tags
+}
+
+# ─── Key Vault ───────────────────────────────────────────────
+# Equivalente a AWS Secrets Manager
+
 resource "random_string" "kv_suffix" {
   length  = 6
   special = false
@@ -203,20 +235,26 @@ resource "azurerm_key_vault" "main" {
   tenant_id                  = data.azurerm_client_config.current.tenant_id
   sku_name                   = "standard"
   soft_delete_retention_days = 7
-  purge_protection_enabled   = false # false para labs (facilita cleanup)
+  purge_protection_enabled   = false
 
-  # Solo el service principal de Terraform puede gestionar secretos
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
     object_id = data.azurerm_client_config.current.object_id
 
-    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
+    secret_permissions = [
+      "Get",
+      "List",
+      "Set",
+      "Delete",
+      "Purge"
+    ]
   }
 
   tags = var.tags
 }
 
-# Contraseña de DB generada aleatoriamente (nunca hardcodeada)
+# ─── Password seguro para MySQL ──────────────────────────────
+
 resource "random_password" "db_password" {
   length           = 16
   special          = true
@@ -227,25 +265,36 @@ resource "azurerm_key_vault_secret" "db_password" {
   name         = "db-password"
   value        = random_password.db_password.result
   key_vault_id = azurerm_key_vault.main.id
+
+  depends_on = [
+    azurerm_key_vault.main
+  ]
 }
 
-# ─── MySQL Flexible Server (equivalente a Amazon RDS MySQL) ──
+# ─── MySQL Flexible Server ───────────────────────────────────
+# Equivalente conceptual a Amazon RDS MySQL
+
 resource "azurerm_mysql_flexible_server" "main" {
   name                   = "mysql-${var.app_name}"
   resource_group_name    = azurerm_resource_group.main.name
   location               = azurerm_resource_group.main.location
   administrator_login    = var.db_admin_username
   administrator_password = random_password.db_password.result
-  sku_name               = "B_Standard_B1ms" # Burstable - mínimo costo para lab
-  version                = "8.0.21"
 
-  # Integración con VNet privada (no public endpoint)
+  sku_name = "B_Standard_B1ms"
+  version  = "8.0.21"
+
   delegated_subnet_id = azurerm_subnet.private.id
+  private_dns_zone_id = azurerm_private_dns_zone.mysql.id
 
   backup_retention_days        = 7
   geo_redundant_backup_enabled = false
 
   tags = var.tags
+
+  depends_on = [
+    azurerm_private_dns_zone_virtual_network_link.mysql
+  ]
 }
 
 resource "azurerm_mysql_flexible_database" "students" {
@@ -256,7 +305,9 @@ resource "azurerm_mysql_flexible_database" "students" {
   collation           = "utf8mb4_unicode_ci"
 }
 
-# ─── Container Instance (equivalente a EC2 + app) ────────────
+# ─── Azure Container Instance ────────────────────────────────
+# Equivalente simplificado a EC2 + aplicación
+
 resource "azurerm_container_group" "app" {
   name                = "aci-${var.app_name}"
   location            = azurerm_resource_group.main.location
@@ -275,7 +326,7 @@ resource "azurerm_container_group" "app" {
     memory = "1.0"
 
     ports {
-      port     = 5000
+      port     = 80
       protocol = "TCP"
     }
 
@@ -283,12 +334,11 @@ resource "azurerm_container_group" "app" {
       FLASK_ENV = "production"
     }
 
-    # Secretos se inyectan como variables de entorno seguras (no hardcodeadas)
     secure_environment_variables = {
       DB_PASSWORD = random_password.db_password.result
       DB_HOST     = azurerm_mysql_flexible_server.main.fqdn
       DB_USER     = var.db_admin_username
-      DB_NAME     = "studentsdb"
+      DB_NAME     = azurerm_mysql_flexible_database.students.name
     }
   }
 
@@ -296,9 +346,10 @@ resource "azurerm_container_group" "app" {
 }
 
 # ─── Outputs ─────────────────────────────────────────────────
+
 output "app_url" {
   description = "URL pública de la aplicación"
-  value       = "http://${azurerm_container_group.app.ip_address}:5000"
+  value       = "http://${azurerm_container_group.app.ip_address}:80"
 }
 
 output "key_vault_name" {
@@ -314,4 +365,9 @@ output "db_host" {
 output "resource_group" {
   description = "Resource Group creado"
   value       = azurerm_resource_group.main.name
+}
+
+output "location" {
+  description = "Región donde se desplegó el laboratorio"
+  value       = azurerm_resource_group.main.location
 }
