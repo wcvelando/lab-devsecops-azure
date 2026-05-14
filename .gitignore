@@ -1,0 +1,6 @@
+# Terraform
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+backend.tf          # contiene nombre del storage account
