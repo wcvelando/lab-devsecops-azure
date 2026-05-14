@@ -1,7 +1,7 @@
-# 🔐 Lab DevSecOps Azure — Semana 12
+# 🔐 Lab DevSecOps Azure
 ## Seguridad en Cloud Services · UGR · Tecnicatura en Ciberseguridad
 
-> **Objetivo:** Replicar el lab de Student Records (AWS Academy) en Azure,
+> **Objetivo:** Lab en Azure,
 > integrando un pipeline DevSecOps completo con herramientas SAST, DAST,
 > IaC scanning y policy-as-code.
 
@@ -10,14 +10,14 @@
 ## 📐 Arquitectura Azure (equivalencias AWS)
 
 ```
-AWS Academy Lab          →    Este lab (Azure)
+Lab                      →    Este lab (Azure)
 ─────────────────────────────────────────────────────
-EC2 + app Node.js        →    Azure Container Instances (ACI) + Flask
-Amazon RDS MySQL         →    Azure Database for MySQL Flexible Server
-VPC + Subnets            →    Azure Virtual Network + Subnets
-Security Groups          →    Network Security Groups (NSG)
-AWS Secrets Manager      →    Azure Key Vault
-ALB (simplificado)       →    ACI con IP pública
+Azure Container Instances (ACI) + Flask
+Azure Database for MySQL Flexible Server
+Azure Virtual Network + Subnets
+Network Security Groups (NSG)
+Azure Key Vault
+ACI con IP pública
 ```
 
 ## 🛠️ Stack del pipeline
