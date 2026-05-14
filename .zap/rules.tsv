@@ -1,0 +1,24 @@
+# ZAP rules configuration para el lab
+# Formato: ID	WARN/IGNORE/FAIL
+# Referencia: https://www.zaproxy.org/docs/alerts/
+
+# SQL Injection - FAIL (queremos que el estudiante lo vea como crítico)
+40018	WARN
+
+# Cross Site Scripting - WARN
+10010	WARN
+
+# Missing Anti-clickjacking Header - WARN
+10020	WARN
+
+# Content Security Policy Header Not Set - WARN
+10038	WARN
+
+# X-Content-Type-Options Header Missing - WARN
+10021	WARN
+
+# Application Error Disclosure (debug=True) - WARN
+90022	WARN
+
+# Information Disclosure - Debug Error Messages - WARN
+10023	WARN

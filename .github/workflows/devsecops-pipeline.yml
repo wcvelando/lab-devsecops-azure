@@ -1,0 +1,333 @@
+# ============================================================
+# Pipeline DevSecOps - Azure Student Records Lab
+# Semana 12 - Seguridad en Cloud Services - UGR
+#
+# Etapas:
+#   1. gitleaks      → Detección de secretos en código
+#   2. semgrep       → SAST (análisis estático de seguridad)
+#   3. dependency    → OWASP Dependency-Check (vulnerabilidades en deps)
+#   4. checkov       → IaC security scan (Terraform)
+#   5. conftest      → OPA policy evaluation (Terraform)
+#   6. trivy-image   → Container vulnerability scan
+#   7. zap-dast      → DAST con OWASP ZAP (app en ejecución)
+#   8. summary       → Resumen de hallazgos para demo
+# ============================================================
+
+name: DevSecOps Pipeline - Azure Lab
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # permite ejecución manual desde la UI de GitHub
+
+permissions:
+  contents: read
+  security-events: write  # necesario para subir resultados SARIF
+  actions: read
+
+jobs:
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 1: Detección de secretos (Gitleaks)
+  # OWASP A02 - Cryptographic Failures / Credenciales expuestas
+  # ══════════════════════════════════════════════════════════
+  gitleaks:
+    name: "🔑 Gitleaks - Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # histórico completo para escanear todos los commits
+
+      - name: Ejecutar Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Gitleaks falla el job si encuentra secretos hardcodeados.
+        # El estudiante debe ver SECRET_KEY y DB_PASSWORD detectados en app.py
+        continue-on-error: true  # en lab: no bloquear, mostrar hallazgo
+
+      - name: Guardar reporte Gitleaks
+        if: always()
+        run: |
+          echo "### 🔑 Gitleaks Results" >> $GITHUB_STEP_SUMMARY
+          echo "Buscar en los logs: SECRET_KEY y DB_PASSWORD hardcodeados en app/app.py" >> $GITHUB_STEP_SUMMARY
+          echo "Remediación: usar Azure Key Vault + variables de entorno seguras" >> $GITHUB_STEP_SUMMARY
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 2: SAST - Análisis estático (Semgrep)
+  # OWASP A03 - Injection, A02 - Cryptographic Failures
+  # ══════════════════════════════════════════════════════════
+  semgrep:
+    name: "🔍 Semgrep - SAST"
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Ejecutar Semgrep (Python security rules)
+        run: |
+          semgrep scan \
+            --config=p/python \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --sarif \
+            --output=semgrep-results.sarif \
+            --error \
+            app/ || true
+        # Reglas que van a disparar:
+        # - python.flask.security.audit.hardcoded-secret (SECRET_KEY)
+        # - python.lang.security.audit.sqli.avoided-sql-injection (SQL injection en search)
+        # - generic.secrets.security.detected-generic-secret
+
+      - name: Subir resultados SARIF a GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+
+      - name: Mostrar resumen en logs
+        if: always()
+        run: |
+          echo "### 🔍 Semgrep SAST Results" >> $GITHUB_STEP_SUMMARY
+          echo "Hallazgos esperados:" >> $GITHUB_STEP_SUMMARY
+          echo "- SQL Injection en /students/search (app.py línea ~60)" >> $GITHUB_STEP_SUMMARY
+          echo "- Hardcoded secret: SECRET_KEY y DB_PASSWORD" >> $GITHUB_STEP_SUMMARY
+          echo "- Flask debug=True en producción" >> $GITHUB_STEP_SUMMARY
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 3: Dependency Check (OWASP)
+  # OWASP A06 - Vulnerable and Outdated Components
+  # ══════════════════════════════════════════════════════════
+  dependency-check:
+    name: "📦 OWASP Dependency-Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Ejecutar OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "student-records-lab"
+          path: "app/"
+          format: "HTML"
+          out: "dependency-check-report"
+          args: >
+            --enableRetired
+            --enableExperimental
+
+      - name: Subir reporte como artefacto
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-report
+          path: dependency-check-report/
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 4: IaC Security Scan (Checkov)
+  # CIS Azure Benchmark, OWASP A05 - Misconfiguration
+  # ══════════════════════════════════════════════════════════
+  checkov:
+    name: "🏗️ Checkov - IaC Security"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar Checkov
+        run: pip install checkov
+
+      - name: Ejecutar Checkov en Terraform
+        run: |
+          checkov \
+            --directory terraform/ \
+            --framework terraform \
+            --output sarif \
+            --output-file-path checkov-results.sarif \
+            --soft-fail || true
+        # Checkov va a detectar:
+        # - CKV_AZURE_131: Key Vault sin network ACLs
+        # - CKV_AZURE_1: NSG - SSH abierto
+        # - CKV_AZURE_182: MySQL sin SSL enforcement
+        # - CKV_AZURE_28: Container sin CPU limits
+
+      - name: Subir resultados SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov
+
+      - name: Mostrar resultados en resumen
+        if: always()
+        run: |
+          checkov --directory terraform/ --framework terraform --compact || true
+          echo "### 🏗️ Checkov IaC Results" >> $GITHUB_STEP_SUMMARY
+          echo "Revisar findings de CIS Azure en el Security tab de GitHub" >> $GITHUB_STEP_SUMMARY
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 5: OPA Policy Validation (Conftest)
+  # Policy-as-Code: reglas de seguridad propias
+  # ══════════════════════════════════════════════════════════
+  conftest:
+    name: "📋 OPA/Conftest - Policy as Code"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar Conftest
+        run: |
+          wget -q https://github.com/open-policy-agent/conftest/releases/download/v0.51.0/conftest_0.51.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Convertir Terraform a JSON para Conftest
+        run: |
+          cd terraform
+          # Conftest necesita el plan en JSON; usamos terraform show
+          # En lab: analizamos el .tf directamente con --parser hcl2
+          conftest test \
+            --policy ../policies/conftest/ \
+            --parser hcl2 \
+            main.tf || true
+
+      - name: Mostrar resumen de políticas
+        if: always()
+        run: |
+          echo "### 📋 OPA/Conftest Policy Results" >> $GITHUB_STEP_SUMMARY
+          echo "Políticas evaluadas:" >> $GITHUB_STEP_SUMMARY
+          echo "- deny: NSG con MySQL público" >> $GITHUB_STEP_SUMMARY
+          echo "- deny: SSH abierto a Internet" >> $GITHUB_STEP_SUMMARY
+          echo "- deny: imágenes de docker.io público" >> $GITHUB_STEP_SUMMARY
+          echo "- warn: backup < 7 días" >> $GITHUB_STEP_SUMMARY
+          echo "- warn: tags obligatorios faltantes" >> $GITHUB_STEP_SUMMARY
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 6: Build + Trivy Image Scan
+  # OWASP A06 - Vulnerable Components (en imagen Docker)
+  # ══════════════════════════════════════════════════════════
+  trivy:
+    name: "🐳 Trivy - Container Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Build imagen Docker localmente
+        run: |
+          docker build -t student-records:test ./app/
+
+      - name: Ejecutar Trivy en la imagen
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "student-records:test"
+          format: "sarif"
+          output: "trivy-image-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"  # en lab: no bloquear, mostrar hallazgos
+
+      - name: Ejecutar Trivy en IaC (Terraform)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "config"
+          scan-ref: "terraform/"
+          format: "table"
+          exit-code: "0"
+
+      - name: Subir resultados SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 7: DAST con OWASP ZAP
+  # OWASP A03 - Injection, A07 - Auth failures, etc.
+  # Ejecuta la app localmente y la escanea dinámicamente
+  # ══════════════════════════════════════════════════════════
+  zap-dast:
+    name: "🕷️ OWASP ZAP - DAST"
+    runs-on: ubuntu-latest
+    needs: [trivy]  # solo después de que la imagen se construya correctamente
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Build y levantar app localmente
+        run: |
+          docker build -t student-records:test ./app/
+          docker run -d \
+            --name student-records-test \
+            -p 5000:5000 \
+            -e DB_PATH=/tmp/students.db \
+            student-records:test
+
+          # Esperar a que la app esté lista
+          echo "Esperando que la app inicie..."
+          sleep 10
+          curl -f http://localhost:5000/ || (docker logs student-records-test && exit 1)
+
+      - name: Ejecutar OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://localhost:5000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"  # incluye ajax spider
+          allow_issue_writing: false
+          fail_action: false  # en lab: no fallar el pipeline, mostrar hallazgos
+
+      - name: Subir reporte ZAP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: report_html.html
+
+      - name: Mostrar resumen ZAP
+        if: always()
+        run: |
+          echo "### 🕷️ OWASP ZAP DAST Results" >> $GITHUB_STEP_SUMMARY
+          echo "Hallazgos esperados en /students/search:" >> $GITHUB_STEP_SUMMARY
+          echo "- SQL Injection (OWASP A03)" >> $GITHUB_STEP_SUMMARY
+          echo "- Missing security headers (X-Frame-Options, CSP)" >> $GITHUB_STEP_SUMMARY
+          echo "- Application error disclosure (debug=True)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup contenedor
+        if: always()
+        run: docker rm -f student-records-test || true
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 8: Resumen final para demo en clase
+  # ══════════════════════════════════════════════════════════
+  summary:
+    name: "📊 Resumen de Seguridad"
+    runs-on: ubuntu-latest
+    needs: [gitleaks, semgrep, dependency-check, checkov, conftest, trivy, zap-dast]
+    if: always()
+    steps:
+      - name: Generar resumen final
+        run: |
+          echo "# 🔐 Resumen DevSecOps Pipeline - Lab Semana 12" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Herramienta | Qué detecta | OWASP |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|-------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Gitleaks | Secretos hardcodeados | A02 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Semgrep | SQL Injection, secretos en código | A03, A02 |" >> $GITHUB_STEP_SUMMARY
+          echo "| OWASP Dep-Check | Dependencias vulnerables | A06 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkov | Misconfiguración en IaC | A05 |" >> $GITHUB_STEP_SUMMARY
+          echo "| OPA/Conftest | Políticas de seguridad propias | A05 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy | CVEs en imagen Docker | A06 |" >> $GITHUB_STEP_SUMMARY
+          echo "| OWASP ZAP | Vulnerabilidades en runtime | A03, A07 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Instrucción para el estudiante" >> $GITHUB_STEP_SUMMARY
+          echo "Ir a la pestaña **Security → Code Scanning** para ver todos los hallazgos SARIF." >> $GITHUB_STEP_SUMMARY
+          echo "Para la demo: identificar al menos 3 vulnerabilidades y proponer su remediación." >> $GITHUB_STEP_SUMMARY
